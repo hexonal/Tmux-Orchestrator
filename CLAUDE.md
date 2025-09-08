@@ -1,5 +1,100 @@
 # Claude.md - Tmux Orchestrator Project Knowledge Base
 
+## ⚙️ 环境配置和路径设置
+
+### 🔧 必须的环境变量设置
+
+在使用任何命令之前，请确保设置以下环境变量：
+
+```bash
+# 添加到 ~/.bashrc 或 ~/.zshrc
+export TMUX_ORCHESTRATOR_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CODING_DIR="${CODING_DIR:-$HOME/Coding}"
+
+# 智能检测所有编程语言项目目录的函数
+detect_all_coding_directories() {
+    local all_dirs=(
+        # 通用开发目录
+        "$HOME/Coding" "$HOME/Projects" "$HOME/Code" "$HOME/Development" 
+        "$HOME/workspace" "$HOME/dev" "$HOME/src" "$HOME/work" "$HOME/repos"
+        
+        # IDE 专用目录
+        "$HOME/PycharmProjects"      # PyCharm (Python)
+        "$HOME/IdeaProjects"         # IntelliJ IDEA (Java/Kotlin)  
+        "$HOME/WebstormProjects"     # WebStorm (JavaScript/TypeScript)
+        "$HOME/CLionProjects"        # CLion (C/C++)
+        
+        # 语言特定目录
+        "$HOME/python-projects" "$HOME/java-projects" "$HOME/nodejs-projects"
+        "$HOME/go-projects" "$HOME/golang-projects" "$HOME/rust-projects"
+        "$HOME/go/src" "$GOPATH/src"
+    )
+    
+    for dir in "${all_dirs[@]}"; do
+        [ -d "$dir" ] && [ -n "$dir" ] && echo "$dir"
+    done
+}
+
+# 向后兼容的函数
+detect_coding_directory() {
+    local dirs=($(detect_all_coding_directories))
+    if [ ${#dirs[@]} -gt 0 ]; then
+        echo "${dirs[0]}"
+    else
+        mkdir -p "$HOME/Coding" && echo "$HOME/Coding"
+    fi
+}
+
+# 智能项目搜索函数
+find_project_in_all_dirs() {
+    local project_name="$1"
+    local found_paths=()
+    
+    # 在所有编程目录中搜索项目
+    while IFS= read -r base_dir; do
+        if [ -d "$base_dir/$project_name" ]; then
+            found_paths+=("$base_dir/$project_name")
+        fi
+        # 也搜索匹配的项目名称
+        find "$base_dir" -maxdepth 2 -name "*$project_name*" -type d 2>/dev/null | while read -r path; do
+            found_paths+=("$path")
+        done
+    done < <(detect_all_coding_directories)
+    
+    # 返回找到的路径
+    printf '%s\n' "${found_paths[@]}" | sort -u
+}
+
+# 设置编排器根目录（自动检测脚本位置）
+if [ -z "$TMUX_ORCHESTRATOR_HOME" ]; then
+    if [ -f "$(pwd)/send-claude-message.sh" ]; then
+        export TMUX_ORCHESTRATOR_HOME="$(pwd)"
+    elif [ -f "$HOME/.tmux-orchestrator/send-claude-message.sh" ]; then
+        export TMUX_ORCHESTRATOR_HOME="$HOME/.tmux-orchestrator"
+    else
+        echo "Warning: TMUX_ORCHESTRATOR_HOME not set. Please set manually."
+    fi
+fi
+```
+
+### 📁 通用目录结构
+
+```
+$TMUX_ORCHESTRATOR_HOME/          # 项目根目录 (自动检测)
+├── send-claude-message.sh        # 消息发送脚本
+├── schedule_with_note.sh          # 调度脚本
+├── CLAUDE.md                     # 此文档
+└── registry/                     # 日志和状态目录
+    ├── logs/                     # 代理对话日志
+    ├── sessions.json             # 活跃会话跟踪  
+    └── notes/                    # 编排器笔记
+
+$CODING_DIR/                      # 代码目录 (自动检测)
+├── project1/                     # 用户项目
+├── project2/
+└── ...
+```
+
 ## Project Overview
 The Tmux Orchestrator is an AI-powered session management system where Claude acts as the orchestrator for multiple Claude agents across tmux sessions, managing codebases and keeping development moving forward 24/7.
 
@@ -140,21 +235,47 @@ tmux rename-window -t glacier-backend:3 "Uvicorn-API"
 
 Follow this systematic sequence to start any project:
 
-#### 1. Find the Project
+#### 1. Find the Project (智能多目录搜索)
 ```bash
-# List all directories in ~/Coding to find projects
-ls -la ~/Coding/ | grep "^d" | awk '{print $NF}' | grep -v "^\."
+# 使用智能项目发现工具
+./find-project.sh                    # 列出所有项目
+./find-project.sh "task"             # 搜索包含 "task" 的项目
+./find-project.sh "" --type Python   # 只显示 Python 项目
+./find-project.sh "task" --type Node.js  # 组合搜索
 
-# If project name is ambiguous, list matches
-ls -la ~/Coding/ | grep -i "task"  # for "task templates"
+# 传统方法（如果需要）
+CODING_DIRS=($(detect_all_coding_directories))
+for dir in "${CODING_DIRS[@]}"; do
+    echo "=== $dir ==="
+    ls -la "$dir/" | grep "^d" | awk '{print $NF}' | grep -v "^\."
+done
 ```
 
-#### 2. Create Tmux Session
+#### 2. Create Tmux Session  
 ```bash
-# Create session with project name (use hyphens for spaces)
+# 智能项目路径检测
 PROJECT_NAME="task-templates"  # or whatever the folder is called
-PROJECT_PATH="/Users/jasonedward/Coding/$PROJECT_NAME"
-tmux new-session -d -s $PROJECT_NAME -c "$PROJECT_PATH"
+
+# 方法1: 使用智能搜索找到项目的实际路径
+PROJECT_PATHS=($(find_project_in_all_dirs "$PROJECT_NAME"))
+if [ ${#PROJECT_PATHS[@]} -gt 0 ]; then
+    PROJECT_PATH="${PROJECT_PATHS[0]}"  # 使用第一个找到的路径
+    echo "找到项目: $PROJECT_PATH"
+else
+    # 方法2: 传统检测（备用）
+    CODING_DIR=$(detect_coding_directory)
+    PROJECT_PATH="$CODING_DIR/$PROJECT_NAME"
+    echo "使用默认路径: $PROJECT_PATH"
+fi
+
+# 验证路径存在
+if [ ! -d "$PROJECT_PATH" ]; then
+    echo "错误: 项目路径不存在: $PROJECT_PATH"
+    exit 1
+fi
+
+# 创建 tmux 会话
+tmux new-session -d -s "$PROJECT_NAME" -c "$PROJECT_PATH"
 ```
 
 #### 3. Set Up Standard Windows
@@ -172,7 +293,7 @@ tmux new-window -t $PROJECT_NAME -n "Dev-Server" -c "$PROJECT_PATH"
 #### 4. Brief the Claude Agent
 ```bash
 # Send briefing message to Claude agent
-tmux send-keys -t $PROJECT_NAME:0 "claude" Enter
+tmux send-keys -t $PROJECT_NAME:0 "claude --dangerously-skip-permissions" Enter
 sleep 5  # Wait for Claude to start
 
 # Send the briefing
@@ -253,15 +374,16 @@ ls -la ~/Coding/ | grep -i task
 # Found: task-templates
 
 # 2. Create session
-tmux new-session -d -s task-templates -c "/Users/jasonedward/Coding/task-templates"
+CODING_DIR=$(detect_coding_directory)
+tmux new-session -d -s task-templates -c "$CODING_DIR/task-templates"
 
 # 3. Set up windows
 tmux rename-window -t task-templates:0 "Claude-Agent"
-tmux new-window -t task-templates -n "Shell" -c "/Users/jasonedward/Coding/task-templates"
-tmux new-window -t task-templates -n "Dev-Server" -c "/Users/jasonedward/Coding/task-templates"
+tmux new-window -t task-templates -n "Shell" -c "$CODING_DIR/task-templates"
+tmux new-window -t task-templates -n "Dev-Server" -c "$CODING_DIR/task-templates"
 
 # 4. Start Claude and brief
-tmux send-keys -t task-templates:0 "claude" Enter
+tmux send-keys -t task-templates:0 "claude --dangerously-skip-permissions" Enter
 # ... (briefing as above)
 ```
 
@@ -296,7 +418,7 @@ tmux new-window -t [session] -n "Project-Manager" -c "$PROJECT_PATH"
 #### 3. Start and Brief the PM
 ```bash
 # Start Claude
-tmux send-keys -t [session]:[PM-window] "claude" Enter
+tmux send-keys -t [session]:[PM-window] "claude --dangerously-skip-permissions" Enter
 sleep 5
 
 # Send PM-specific briefing
@@ -379,10 +501,11 @@ Priority: HIGH/MED/LOW
 #### 1. Project Analysis
 ```bash
 # Find project
-ls -la ~/Coding/ | grep -i "[project-name]"
+CODING_DIR=$(detect_coding_directory)
+ls -la "$CODING_DIR/" | grep -i "[project-name]"
 
 # Analyze project type
-cd ~/Coding/[project-name]
+cd "$CODING_DIR/[project-name]"
 test -f package.json && echo "Node.js project"
 test -f requirements.txt && echo "Python project"
 ```
@@ -409,7 +532,7 @@ tmux new-window -t [session] -n "TEMP-CodeReview"
 ```bash
 # 1. Capture complete conversation
 tmux capture-pane -t [session]:[window] -S - -E - > \
-  ~/Coding/Tmux\ orchestrator/registry/logs/[session]_[role]_$(date +%Y%m%d_%H%M%S).log
+  "$TMUX_ORCHESTRATOR_HOME/registry/logs/[session]_[role]_$(date +%Y%m%d_%H%M%S).log"
 
 # 2. Create summary of work completed
 echo "=== Agent Summary ===" >> [logfile]
@@ -423,7 +546,7 @@ tmux kill-window -t [session]:[window]
 
 ### Agent Logging Structure
 ```
-~/Coding/Tmux orchestrator/registry/
+$TMUX_ORCHESTRATOR_HOME/registry/
 ├── logs/            # Agent conversation logs
 ├── sessions.json    # Active session tracking
 └── notes/           # Orchestrator notes and summaries
@@ -539,7 +662,7 @@ tmux capture-pane -t session:window -p | tail -50
 ```
 
 #### Mistake 3: Typing Commands in Already Active Sessions
-**What Went Wrong**: Typed "claude" in a window that already had Claude running
+**What Went Wrong**: Typed "claude --dangerously-skip-permissions" in a window that already had Claude running
 
 **Root Cause**: Not checking window contents before sending commands
 
@@ -622,20 +745,20 @@ When a command fails:
 #### Using send-claude-message.sh
 ```bash
 # Basic usage - ALWAYS use this instead of manual tmux commands
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh <target> "message"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" <target> "message"
 
 # Examples:
 # Send to a window
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh agentic-seek:3 "Hello Claude!"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" agentic-seek:3 "Hello Claude!"
 
 # Send to a specific pane in split-screen
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh tmux-orc:0.1 "Message to pane 1"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" tmux-orc:0.1 "Message to pane 1"
 
 # Send complex instructions
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh glacier-backend:0 "Please check the database schema for the campaigns table and verify all columns are present"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" glacier-backend:0 "Please check the database schema for the campaigns table and verify all columns are present"
 
 # Send status update requests
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh ai-chat:2 "STATUS UPDATE: What's your current progress on the authentication implementation?"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" ai-chat:2 "STATUS UPDATE: What's your current progress on the authentication implementation?"
 ```
 
 #### Why Use the Script?
@@ -646,7 +769,7 @@ When a command fails:
 5. **Consistent messaging**: All agents receive messages the same way
 
 #### Script Location and Usage
-- **Location**: `/Users/jasonedward/Coding/Tmux orchestrator/send-claude-message.sh`
+- **Location**: `$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh`
 - **Permissions**: Already executable, ready to use
 - **Arguments**: 
   - First: target (session:window or session:window.pane)
@@ -657,38 +780,38 @@ When a command fails:
 ##### 1. Starting Claude and Initial Briefing
 ```bash
 # Start Claude first
-tmux send-keys -t project:0 "claude" Enter
+tmux send-keys -t project:0 "claude --dangerously-skip-permissions" Enter
 sleep 5
 
 # Then use the script for the briefing
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh project:0 "You are responsible for the frontend codebase. Please start by analyzing the current project structure and identifying any immediate issues."
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" project:0 "You are responsible for the frontend codebase. Please start by analyzing the current project structure and identifying any immediate issues."
 ```
 
 ##### 2. Cross-Agent Coordination
 ```bash
 # Ask frontend agent about API usage
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh frontend:0 "Which API endpoints are you currently using from the backend?"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" frontend:0 "Which API endpoints are you currently using from the backend?"
 
 # Share info with backend agent
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh backend:0 "Frontend is using /api/v1/campaigns and /api/v1/flows endpoints"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" backend:0 "Frontend is using /api/v1/campaigns and /api/v1/flows endpoints"
 ```
 
 ##### 3. Status Checks
 ```bash
 # Quick status request
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh session:0 "Quick status update please"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" session:0 "Quick status update please"
 
 # Detailed status request
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh session:0 "STATUS UPDATE: Please provide: 1) Completed tasks, 2) Current work, 3) Any blockers"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" session:0 "STATUS UPDATE: Please provide: 1) Completed tasks, 2) Current work, 3) Any blockers"
 ```
 
 ##### 4. Providing Assistance
 ```bash
 # Share error information
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh session:0 "I see in your server window that port 3000 is already in use. Try port 3001 instead."
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" session:0 "I see in your server window that port 3000 is already in use. Try port 3001 instead."
 
 # Guide stuck agents
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh session:0 "The error you're seeing is because the virtual environment isn't activated. Run 'source venv/bin/activate' first."
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" session:0 "The error you're seeing is because the virtual environment isn't activated. Run 'source venv/bin/activate' first."
 ```
 
 #### OLD METHOD (DO NOT USE)
@@ -699,14 +822,14 @@ sleep 1
 tmux send-keys -t session:window Enter
 
 # ✅ DO THIS INSTEAD:
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh session:window "message"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" session:window "message"
 ```
 
 #### Checking for Responses
 After sending a message, check for the response:
 ```bash
 # Send message
-/Users/jasonedward/Coding/Tmux\ orchestrator/send-claude-message.sh session:0 "What's your status?"
+"$TMUX_ORCHESTRATOR_HOME/send-claude-message.sh" session:0 "What's your status?"
 
 # Wait a bit for response
 sleep 5
